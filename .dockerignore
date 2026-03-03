@@ -1,0 +1,10 @@
+node_modules
+frontend/node_modules
+backend/static
+backend/__pycache__
+__pycache__
+.git
+.claude
+*.md
+*.pyc
+.env

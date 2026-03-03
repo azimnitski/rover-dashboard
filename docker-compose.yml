@@ -1,0 +1,14 @@
+services:
+  dashboard:
+    build: .
+    ports:
+      - "8765:8765"
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+    networks:
+      - ros_net
+    restart: unless-stopped
+
+networks:
+  ros_net:
+    external: true
