@@ -31,9 +31,11 @@ if not MOCK_MODE:
         import rclpy
         from rclpy.node import Node
         from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-        from sensor_msgs.msg import Imu, BatteryState, CameraInfo, Image
-        from geometry_msgs.msg import Twist
-        from std_msgs.msg import Float32, Float32MultiArray, Int32MultiArray
+        from sensor_msgs.msg import Imu, BatteryState, CameraInfo, Image, NavSatFix, MagneticField, PointCloud2
+        from geometry_msgs.msg import Twist, PoseWithCovarianceStamped
+        from nav_msgs.msg import Odometry, OccupancyGrid, Path
+        from std_msgs.msg import Float32, Float32MultiArray, Int32MultiArray, Int32, Bool
+        from diagnostic_msgs.msg import DiagnosticArray
         from realsense2_camera_msgs.msg import Metadata, Extrinsics
         ROS_AVAILABLE = True
     except ImportError:
@@ -49,10 +51,16 @@ if not MOCK_MODE:
 # Add new topics here as your robot grows.
 
 TOPIC_CONFIG = [
+    # ESP32 (micro-ROS)
     {
-        "topic": "/imu/data",
+        "topic": "/imu",
         "type": "sensor_msgs/msg/Imu",
-        "throttle_hz": 10,  # IMU may publish at 100Hz, we only need 10
+        "throttle_hz": 10,
+    },
+    {
+        "topic": "/imu/mag",
+        "type": "sensor_msgs/msg/MagneticField",
+        "throttle_hz": 5,
     },
     {
         "topic": "/battery_voltage",
@@ -65,19 +73,66 @@ TOPIC_CONFIG = [
         "throttle_hz": 1,
     },
     {
-        "topic": "/motors/status",
-        "type": "std_msgs/msg/Float32MultiArray",
-        "throttle_hz": 5,
+        "topic": "/wheel_speed_left",
+        "type": "std_msgs/msg/Float32",
+        "throttle_hz": 10,
     },
     {
-        "topic": "/motors/current",
-        "type": "std_msgs/msg/Float32MultiArray",
-        "throttle_hz": 5,
+        "topic": "/wheel_speed_right",
+        "type": "std_msgs/msg/Float32",
+        "throttle_hz": 10,
+    },
+    {
+        "topic": "/freertos_int32_publisher",
+        "type": "std_msgs/msg/Int32",
+        "throttle_hz": 1,
     },
     {
         "topic": "/cmd_vel",
         "type": "geometry_msgs/msg/Twist",
         "throttle_hz": 10,
+    },
+    # RTABMAP / Navigation
+    {
+        "topic": "/rtabmap/odom",
+        "type": "nav_msgs/msg/Odometry",
+        "throttle_hz": 5,
+    },
+    {
+        "topic": "/rtabmap/global_path",
+        "type": "nav_msgs/msg/Path",
+        "throttle_hz": 2,
+    },
+    {
+        "topic": "/rtabmap/local_path",
+        "type": "nav_msgs/msg/Path",
+        "throttle_hz": 5,
+    },
+    {
+        "topic": "/rtabmap/global_pose",
+        "type": "geometry_msgs/msg/PoseWithCovarianceStamped",
+        "throttle_hz": 2,
+    },
+    {
+        "topic": "/rtabmap/localization_pose",
+        "type": "geometry_msgs/msg/PoseWithCovarianceStamped",
+        "throttle_hz": 5,
+    },
+    {
+        "topic": "/rtabmap/goal_reached",
+        "type": "std_msgs/msg/Bool",
+        "throttle_hz": 2,
+    },
+    # Other sensors
+    {
+        "topic": "/diagnostics",
+        "type": "diagnostic_msgs/msg/DiagnosticArray",
+        "throttle_hz": 1,
+    },
+    {
+        "topic": "/gps/fix",
+        "type": "sensor_msgs/msg/NavSatFix",
+        "throttle_hz": 1,
     },
     # RealSense D455 — metadata / intrinsics / extrinsics
     {
@@ -110,6 +165,17 @@ TOPIC_CONFIG = [
         "type": "realsense2_camera_msgs/msg/Extrinsics",
         "throttle_hz": 1,
     },
+]
+
+# OccupancyGrid topics rendered to JPEG and streamed as binary frames
+MAP_TOPICS = [
+    {"topic": "/rtabmap/map",           "camera_id": "slam_map"},
+    {"topic": "/rtabmap/grid_prob_map", "camera_id": "slam_prob_map"},
+]
+
+# PointCloud2 topics streamed as packed binary frames
+POINTCLOUD_TOPICS = [
+    {"topic": "/rtabmap/cloud_map", "camera_id": "pointcloud3d"},
 ]
 
 # Image topics streamed as JPEG binary frames (not JSON telemetry)
@@ -159,6 +225,105 @@ def parse_twist(msg) -> dict:
     }
 
 
+def parse_magnetic_field(msg) -> dict:
+    return {
+        "x": msg.magnetic_field.x,
+        "y": msg.magnetic_field.y,
+        "z": msg.magnetic_field.z,
+    }
+
+
+def parse_freertos_diag(msg) -> dict:
+    """
+    Decode the packed ESP32 diagnostic integer:
+      motor×10⁷ + enc×10⁶ + imu×10⁵ + mag×10⁴ + lpwm×100 + cmd_count
+    The whole value can be negative when left PWM is negative (reverse).
+    """
+    raw = msg.data
+    v = abs(raw)
+    motor_ok = bool((v // 10_000_000) % 10)
+    enc_ok   = bool((v // 1_000_000)  % 10)
+    imu_ok   = bool((v // 100_000)    % 10)
+    mag_ok   = bool((v // 10_000)     % 10)
+    remainder = v % 10_000          # lpwm×100 + cmd_count (cmd_count < 100)
+    lpwm      = (remainder // 100) * (-1 if raw < 0 else 1)
+    cmd_count = remainder % 100
+    return {
+        "motor_ok":  motor_ok,
+        "enc_ok":    enc_ok,
+        "imu_ok":    imu_ok,
+        "mag_ok":    mag_ok,
+        "lpwm":      lpwm,
+        "cmd_count": cmd_count,
+        "raw":       raw,
+    }
+
+
+def _quat_to_yaw(x, y, z, w) -> float:
+    """Convert quaternion to yaw (rotation around Z axis) in radians."""
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def parse_odometry(msg) -> dict:
+    p = msg.pose.pose.position
+    q = msg.pose.pose.orientation
+    v = msg.twist.twist.linear
+    av = msg.twist.twist.angular
+    return {
+        "position": {"x": p.x, "y": p.y, "z": p.z},
+        "orientation": {"x": q.x, "y": q.y, "z": q.z, "w": q.w},
+        "yaw": _quat_to_yaw(q.x, q.y, q.z, q.w),
+        "linear_velocity": {"x": v.x, "y": v.y, "z": v.z},
+        "angular_velocity": {"z": av.z},
+    }
+
+
+def parse_path(msg) -> dict:
+    poses = []
+    for ps in msg.poses:
+        p = ps.pose.position
+        q = ps.pose.orientation
+        poses.append({"x": p.x, "y": p.y, "yaw": _quat_to_yaw(q.x, q.y, q.z, q.w)})
+    return {"poses": poses}
+
+
+def parse_pose_with_covariance(msg) -> dict:
+    p = msg.pose.pose.position
+    q = msg.pose.pose.orientation
+    return {
+        "position": {"x": p.x, "y": p.y, "z": p.z},
+        "orientation": {"x": q.x, "y": q.y, "z": q.z, "w": q.w},
+        "yaw": _quat_to_yaw(q.x, q.y, q.z, q.w),
+        "covariance": list(msg.pose.covariance[:9]),  # top-left 3x3 of 6x6
+    }
+
+
+def parse_bool(msg) -> dict:
+    return {"value": bool(msg.data)}
+
+
+def parse_diagnostics(msg) -> dict:
+    statuses = []
+    for s in msg.status:
+        statuses.append({
+            "level": int(s.level),  # 0=OK, 1=WARN, 2=ERROR, 3=STALE
+            "name": s.name,
+            "message": s.message,
+            "hardware_id": s.hardware_id,
+        })
+    return {"status": statuses}
+
+
+def parse_navsat(msg) -> dict:
+    return {
+        "latitude": msg.latitude,
+        "longitude": msg.longitude,
+        "altitude": msg.altitude,
+        "status": int(msg.status.status),   # -1=no fix, 0=fix, 2=GBAS
+        "covariance_type": int(msg.position_covariance_type),
+    }
+
+
 def parse_camera_info(msg) -> dict:
     return {
         "width": msg.width,
@@ -197,6 +362,14 @@ PARSERS = {
         "current": msg.current,
         "percentage": msg.percentage,
     },
+    "sensor_msgs/msg/MagneticField": parse_magnetic_field,
+    "std_msgs/msg/Int32": parse_freertos_diag,
+    "nav_msgs/msg/Odometry": parse_odometry,
+    "nav_msgs/msg/Path": parse_path,
+    "geometry_msgs/msg/PoseWithCovarianceStamped": parse_pose_with_covariance,
+    "std_msgs/msg/Bool": parse_bool,
+    "diagnostic_msgs/msg/DiagnosticArray": parse_diagnostics,
+    "sensor_msgs/msg/NavSatFix": parse_navsat,
     "sensor_msgs/msg/CameraInfo": parse_camera_info,
     "realsense2_camera_msgs/msg/Metadata": parse_metadata,
     "realsense2_camera_msgs/msg/Extrinsics": parse_extrinsics,
@@ -211,6 +384,14 @@ if not MOCK_MODE:
         "std_msgs/msg/Int32MultiArray": Int32MultiArray,
         "geometry_msgs/msg/Twist": Twist,
         "sensor_msgs/msg/BatteryState": BatteryState,
+        "sensor_msgs/msg/MagneticField": MagneticField,
+        "std_msgs/msg/Int32": Int32,
+        "nav_msgs/msg/Odometry": Odometry,
+        "nav_msgs/msg/Path": Path,
+        "geometry_msgs/msg/PoseWithCovarianceStamped": PoseWithCovarianceStamped,
+        "std_msgs/msg/Bool": Bool,
+        "diagnostic_msgs/msg/DiagnosticArray": DiagnosticArray,
+        "sensor_msgs/msg/NavSatFix": NavSatFix,
         "sensor_msgs/msg/CameraInfo": CameraInfo,
         "realsense2_camera_msgs/msg/Metadata": Metadata,
         "realsense2_camera_msgs/msg/Extrinsics": Extrinsics,
@@ -229,6 +410,10 @@ class RosBridge:
         self._running = False
         self._last_publish: Dict[str, float] = {}
         self._discovered_topics: List[dict] = []
+        # Latest state for map rendering overlays
+        self._latest_robot_pose: Optional[dict] = None  # {x, y, yaw} in map frame
+        self._latest_global_path: List[dict] = []       # [{x, y}, ...]
+        self._latest_local_path: List[dict] = []
 
     def start(self):
         self._running = True
@@ -332,6 +517,213 @@ class RosBridge:
             except ImportError as e:
                 logger.warning(f"cv_bridge/cv2 not available, camera image streaming disabled: {e}")
 
+        # OccupancyGrid map topics — rendered to JPEG and sent as binary frames
+        if self.on_frame:
+            try:
+                import cv2
+                import numpy as np
+
+                # Track localization pose updates for map overlay
+                def _update_pose(msg):
+                    p = msg.pose.pose.position
+                    q = msg.pose.pose.orientation
+                    self._latest_robot_pose = {
+                        "x": p.x, "y": p.y,
+                        "yaw": _quat_to_yaw(q.x, q.y, q.z, q.w),
+                    }
+
+                def _update_global_path(msg):
+                    self._latest_global_path = [
+                        {"x": ps.pose.position.x, "y": ps.pose.position.y}
+                        for ps in msg.poses
+                    ]
+
+                def _update_local_path(msg):
+                    self._latest_local_path = [
+                        {"x": ps.pose.position.x, "y": ps.pose.position.y}
+                        for ps in msg.poses
+                    ]
+
+                node.create_subscription(
+                    PoseWithCovarianceStamped, "/rtabmap/localization_pose",
+                    _update_pose, sensor_qos
+                )
+                node.create_subscription(Path, "/rtabmap/global_path", _update_global_path, sensor_qos)
+                node.create_subscription(Path, "/rtabmap/local_path", _update_local_path, sensor_qos)
+
+                for map_cfg in MAP_TOPICS:
+                    map_topic = map_cfg["topic"]
+                    camera_id = map_cfg["camera_id"]
+                    min_interval = 1.0 / 2  # cap at 2 fps (maps change slowly)
+
+                    def make_map_callback(cid=camera_id, mi=min_interval):
+                        def callback(msg):
+                            now = time.time()
+                            key = f"__map_{cid}"
+                            if now - self._last_publish.get(key, 0) < mi:
+                                return
+                            self._last_publish[key] = now
+                            try:
+                                w = msg.info.width
+                                h = msg.info.height
+                                if w == 0 or h == 0:
+                                    return
+                                res = msg.info.resolution  # meters/cell
+                                origin_x = msg.info.origin.position.x
+                                origin_y = msg.info.origin.position.y
+
+                                data = np.array(msg.data, dtype=np.int8).reshape((h, w))
+
+                                # Color: unknown=dark gray, free=light gray, occupied=white-ish
+                                img = np.full((h, w, 3), 50, dtype=np.uint8)  # unknown=dark
+                                img[data == 0] = [180, 180, 180]    # free=light gray
+                                img[data == 100] = [20, 20, 20]     # occupied=dark
+                                # For prob map, use gradient
+                                mask_known = (data > 0) & (data < 100)
+                                if mask_known.any():
+                                    img[mask_known] = np.stack([
+                                        (data[mask_known].astype(np.uint16) * 180 // 100).astype(np.uint8),
+                                    ] * 3, axis=-1)
+
+                                # Scale to ≤512px on longest axis
+                                long_side = max(w, h)
+                                if long_side < 64:
+                                    return  # map not ready yet
+                                target = 512
+                                scale = target / long_side
+                                new_w = max(1, int(w * scale))
+                                new_h = max(1, int(h * scale))
+                                img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+
+                                def world_to_px(wx, wy):
+                                    """Convert world coords to pixel coords (pre-flip)."""
+                                    px = int((wx - origin_x) / res * scale)
+                                    py = int((wy - origin_y) / res * scale)
+                                    return px, py
+
+                                # Overlay global path (blue)
+                                pts = self._latest_global_path
+                                if len(pts) > 1:
+                                    for i in range(len(pts) - 1):
+                                        p1 = world_to_px(pts[i]["x"], pts[i]["y"])
+                                        p2 = world_to_px(pts[i+1]["x"], pts[i+1]["y"])
+                                        cv2.line(img, p1, p2, (255, 100, 0), 1)
+
+                                # Overlay local path (cyan)
+                                pts = self._latest_local_path
+                                if len(pts) > 1:
+                                    for i in range(len(pts) - 1):
+                                        p1 = world_to_px(pts[i]["x"], pts[i]["y"])
+                                        p2 = world_to_px(pts[i+1]["x"], pts[i+1]["y"])
+                                        cv2.line(img, p1, p2, (255, 200, 0), 1)
+
+                                # Overlay robot pose (green arrow)
+                                pose = self._latest_robot_pose
+                                if pose:
+                                    px, py = world_to_px(pose["x"], pose["y"])
+                                    arrow_len = max(6, int(0.5 / res * scale))
+                                    yaw = pose["yaw"]
+                                    ex = int(px + arrow_len * math.cos(yaw))
+                                    ey = int(py + arrow_len * math.sin(yaw))
+                                    cv2.circle(img, (px, py), 4, (0, 220, 0), -1)
+                                    cv2.arrowedLine(img, (px, py), (ex, ey),
+                                                    (0, 255, 0), 2, tipLength=0.4)
+
+                                # Flip vertically: ROS origin = bottom-left, image = top-left
+                                img = cv2.flip(img, 0)
+
+                                _, jpeg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                                self.on_frame(cid, jpeg.tobytes())
+                            except Exception as e:
+                                logger.error(f"Error rendering map {cid}: {e}")
+                        return callback
+
+                    node.create_subscription(OccupancyGrid, map_topic, make_map_callback(), sensor_qos)
+                    logger.info(f"Subscribed to {map_topic} as map '{camera_id}' @ 2fps max")
+
+            except ImportError as e:
+                logger.warning(f"cv2/numpy not available, map rendering disabled: {e}")
+
+        # PointCloud2 topics — packed binary frames
+        if self.on_frame:
+            try:
+                import struct
+                import numpy as np
+
+                for pc_cfg in POINTCLOUD_TOPICS:
+                    pc_topic = pc_cfg["topic"]
+                    camera_id = pc_cfg["camera_id"]
+                    min_interval = 1.0 / 2  # cap at 2 fps
+
+                    def make_pc_callback(cid=camera_id, mi=min_interval):
+                        def callback(msg):
+                            now = time.time()
+                            key = f"__pc_{cid}"
+                            if now - self._last_publish.get(key, 0) < mi:
+                                return
+                            self._last_publish[key] = now
+                            try:
+                                n = msg.width * msg.height
+                                if n == 0:
+                                    return
+                                ps = msg.point_step
+                                raw = bytes(msg.data)
+                                fmap = {f.name: f.offset for f in msg.fields}
+                                if not all(k in fmap for k in ('x', 'y', 'z')):
+                                    return
+
+                                arr = np.frombuffer(raw, dtype=np.uint8).reshape(n, ps)
+
+                                def col_f32(off):
+                                    return np.frombuffer(
+                                        arr[:, off:off+4].tobytes(), dtype=np.float32)
+
+                                positions = np.stack([
+                                    col_f32(fmap['x']),
+                                    col_f32(fmap['y']),
+                                    col_f32(fmap['z']),
+                                ], axis=1)
+
+                                valid = np.isfinite(positions).all(axis=1)
+                                positions = positions[valid]
+
+                                colors = None
+                                if 'rgb' in fmap:
+                                    rgb_col = col_f32(fmap['rgb'])[valid]
+                                    rgb_int = rgb_col.view(np.uint32)
+                                    colors = np.stack([
+                                        ((rgb_int >> 16) & 0xFF).astype(np.uint8),
+                                        ((rgb_int >> 8)  & 0xFF).astype(np.uint8),
+                                        (rgb_int         & 0xFF).astype(np.uint8),
+                                    ], axis=1)
+
+                                actual_n = len(positions)
+                                MAX_POINTS = 100_000
+                                if actual_n > MAX_POINTS:
+                                    idx = np.random.choice(actual_n, MAX_POINTS, replace=False)
+                                    positions = positions[idx]
+                                    if colors is not None:
+                                        colors = colors[idx]
+                                    actual_n = MAX_POINTS
+
+                                payload = struct.pack('<I', actual_n)
+                                payload += struct.pack('BBBB',
+                                    1 if colors is not None else 0, 0, 0, 0)
+                                payload += positions.astype(np.float32).tobytes()
+                                if colors is not None:
+                                    payload += colors.tobytes()
+
+                                self.on_frame(cid, payload)
+                            except Exception as e:
+                                logger.error(f"Error packing point cloud {cid}: {e}")
+                        return callback
+
+                    node.create_subscription(PointCloud2, pc_topic, make_pc_callback(), sensor_qos)
+                    logger.info(f"Subscribed to {pc_topic} as point cloud '{camera_id}' @ 2fps max")
+
+            except ImportError as e:
+                logger.warning(f"numpy not available, point cloud streaming disabled: {e}")
+
         # Discover all available topics periodically
         def discover_topics():
             names_and_types = node.get_topic_names_and_types()
@@ -361,7 +753,7 @@ class RosBridge:
             t += 0.1
 
             # Mock IMU
-            self.on_telemetry("/imu/data", {
+            self.on_telemetry("/imu", {
                 "orientation": {
                     "x": 0.01 * math.sin(t * 0.5),
                     "y": 0.02 * math.cos(t * 0.3),
@@ -388,25 +780,25 @@ class RosBridge:
                 "value": 1.2 + random.gauss(0, 0.05),
             })
 
-            # Mock motors (4 motors: FL, FR, RL, RR)
-            base_speed = 50 + 20 * math.sin(t * 0.2)
-            self.on_telemetry("/motors/status", {
-                "values": [
-                    base_speed + random.gauss(0, 2),
-                    base_speed + random.gauss(0, 2),
-                    base_speed + random.gauss(0, 2),
-                    base_speed + random.gauss(0, 2),
-                ],
+            # Mock wheel speeds (m/s, max ~1.0)
+            wheel_v = 0.5 * math.sin(t * 0.2)
+            self.on_telemetry("/wheel_speed_left",  {"value": wheel_v + random.gauss(0, 0.01)})
+            self.on_telemetry("/wheel_speed_right", {"value": wheel_v + random.gauss(0, 0.01)})
+
+            # Mock ESP32 freertos diagnostic int (all subsystems OK, lpwm≈50, cmd_count cycling)
+            cmd_count = int(t * 2) % 100
+            lpwm = int(wheel_v * 100)  # rough approximation
+            mock_diag = 11110000 + lpwm * 100 + cmd_count
+            self.on_telemetry("/freertos_int32_publisher", {
+                "motor_ok": True, "enc_ok": True, "imu_ok": True, "mag_ok": True,
+                "lpwm": lpwm, "cmd_count": cmd_count, "raw": mock_diag,
             })
 
-            # Mock motor currents
-            self.on_telemetry("/motors/current", {
-                "values": [
-                    0.5 + random.gauss(0, 0.1),
-                    0.5 + random.gauss(0, 0.1),
-                    0.5 + random.gauss(0, 0.1),
-                    0.5 + random.gauss(0, 0.1),
-                ],
+            # Mock magnetometer (Earth's field, µT scale)
+            self.on_telemetry("/imu/mag", {
+                "x": 20e-6 * math.cos(t * 0.01) + random.gauss(0, 1e-7),
+                "y": 5e-6  + random.gauss(0, 1e-7),
+                "z": -42e-6 + random.gauss(0, 1e-7),
             })
 
             # Mock cmd_vel
@@ -414,5 +806,63 @@ class RosBridge:
                 "linear": {"x": 0.5 * math.sin(t * 0.1), "y": 0.0, "z": 0.0},
                 "angular": {"x": 0.0, "y": 0.0, "z": 0.3 * math.cos(t * 0.15)},
             })
+
+            # Mock RTABMAP odometry (spiral trajectory)
+            odom_x = 3.0 * math.cos(t * 0.05)
+            odom_y = 3.0 * math.sin(t * 0.05)
+            odom_yaw = t * 0.05 + math.pi / 2
+            self.on_telemetry("/rtabmap/odom", {
+                "position": {"x": odom_x, "y": odom_y, "z": 0.0},
+                "orientation": {"x": 0.0, "y": 0.0, "z": math.sin(odom_yaw / 2), "w": math.cos(odom_yaw / 2)},
+                "yaw": odom_yaw,
+                "linear_velocity": {"x": 0.15, "y": 0.0, "z": 0.0},
+                "angular_velocity": {"z": 0.05},
+            })
+
+            # Mock localization pose
+            self.on_telemetry("/rtabmap/localization_pose", {
+                "position": {"x": odom_x + random.gauss(0, 0.02), "y": odom_y + random.gauss(0, 0.02), "z": 0.0},
+                "orientation": {"x": 0.0, "y": 0.0, "z": math.sin(odom_yaw / 2), "w": math.cos(odom_yaw / 2)},
+                "yaw": odom_yaw,
+                "covariance": [0.01, 0, 0, 0, 0.01, 0, 0, 0, 0.01],
+            })
+
+            # Mock global path (8 waypoints around circle)
+            global_path = [
+                {"x": 3.0 * math.cos(a), "y": 3.0 * math.sin(a), "yaw": a + math.pi / 2}
+                for a in [i * math.pi / 4 for i in range(9)]
+            ]
+            self.on_telemetry("/rtabmap/global_path", {"poses": global_path})
+
+            # Mock local path (next 3 steps ahead)
+            local_path = [
+                {"x": 3.0 * math.cos(t * 0.05 + i * 0.2), "y": 3.0 * math.sin(t * 0.05 + i * 0.2), "yaw": 0.0}
+                for i in range(5)
+            ]
+            self.on_telemetry("/rtabmap/local_path", {"poses": local_path})
+
+            # Mock goal reached
+            self.on_telemetry("/rtabmap/goal_reached", {"value": False})
+
+            # Mock GPS (UCSB area as placeholder)
+            self.on_telemetry("/gps/fix", {
+                "latitude": 34.4140 + random.gauss(0, 0.00001),
+                "longitude": -119.8489 + random.gauss(0, 0.00001),
+                "altitude": 15.0 + random.gauss(0, 0.1),
+                "status": 0,
+                "covariance_type": 2,
+            })
+
+            # Mock diagnostics (every ~2s to avoid spam)
+            if int(t * 10) % 20 == 0:
+                self.on_telemetry("/diagnostics", {
+                    "status": [
+                        {"level": 0, "name": "camera: RealSense D455", "message": "OK", "hardware_id": ""},
+                        {"level": 0, "name": "imu: BNO085", "message": "OK", "hardware_id": ""},
+                        {"level": 1 if random.random() < 0.1 else 0, "name": "battery: INA219",
+                         "message": "Low voltage" if random.random() < 0.1 else "OK", "hardware_id": ""},
+                        {"level": 0, "name": "rtabmap: SLAM", "message": "Localized", "hardware_id": ""},
+                    ]
+                })
 
             time.sleep(0.1)

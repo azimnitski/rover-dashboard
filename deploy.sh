@@ -6,7 +6,7 @@
 set -e
 
 REMOTE=nano
-REMOTE_DIR=~/rover-dashboard
+REMOTE_DIR='~/rover-dashboard'
 
 rsync -av --exclude='.git' --exclude='node_modules' --exclude='frontend/node_modules' \
           --exclude='__pycache__' --exclude='*.pyc' --exclude='backend/static' \

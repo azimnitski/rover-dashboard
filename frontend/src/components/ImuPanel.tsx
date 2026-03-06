@@ -1,51 +1,58 @@
 import { useRosTopic } from '../hooks/useRosTopic';
 import { Move3d } from 'lucide-react';
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  ResponsiveContainer,
-  Legend,
-} from 'recharts';
+import { LineChart, Line, ResponsiveContainer, ReferenceLine } from 'recharts';
 
 type ImuData = {
-  orientation: { x: number; y: number; z: number; w: number };
-  angular_velocity: { x: number; y: number; z: number };
+  angular_velocity:   { x: number; y: number; z: number };
   linear_acceleration: { x: number; y: number; z: number };
 };
 
+type MagData = { x: number; y: number; z: number };
+
+const AXIS_COLORS = ['text-red-400', 'text-green-400', 'text-blue-400'] as const;
+
+function Vec3({
+  label,
+  data,
+  unit,
+  decimals = 3,
+  scale = 1,
+}: {
+  label: string;
+  data: { x: number; y: number; z: number } | null;
+  unit: string;
+  decimals?: number;
+  scale?: number;
+}) {
+  return (
+    <div>
+      <div className="text-[10px] text-panel-muted uppercase tracking-wider mb-1">{label}</div>
+      <div className="font-mono text-xs space-y-px">
+        {(['x', 'y', 'z'] as const).map((axis, i) => {
+          const v = data ? data[axis] * scale : null;
+          return (
+            <div key={axis} className="flex justify-between gap-1">
+              <span className={AXIS_COLORS[i]}>{axis.toUpperCase()}</span>
+              <span className="tabular-nums text-gray-200">
+                {v !== null ? v.toFixed(decimals) : '—'}
+              </span>
+            </div>
+          );
+        })}
+        <div className="text-[9px] text-panel-border pt-0.5">{unit}</div>
+      </div>
+    </div>
+  );
+}
+
 export function ImuPanel() {
-  const { data, history } = useRosTopic<ImuData>('/imu/data', 200);
+  const { data, history } = useRosTopic<ImuData>('/imu', 100);
+  const { data: magData }  = useRosTopic<MagData>('/imu/mag');
 
-  const accel = data?.linear_acceleration ?? { x: 0, y: 0, z: 0 };
-  const gyro = data?.angular_velocity ?? { x: 0, y: 0, z: 0 };
-  const orient = data?.orientation ?? { x: 0, y: 0, z: 0, w: 1 };
+  const accel = data?.linear_acceleration ?? null;
+  const gyro  = data?.angular_velocity   ?? null;
 
-  // Convert quaternion to approximate roll/pitch/yaw (degrees)
-  const toEuler = (q: { x: number; y: number; z: number; w: number }) => {
-    const sinr = 2 * (q.w * q.x + q.y * q.z);
-    const cosr = 1 - 2 * (q.x * q.x + q.y * q.y);
-    const roll = Math.atan2(sinr, cosr) * (180 / Math.PI);
-
-    const sinp = 2 * (q.w * q.y - q.z * q.x);
-    const pitch =
-      Math.abs(sinp) >= 1
-        ? (Math.sign(sinp) * 90)
-        : Math.asin(sinp) * (180 / Math.PI);
-
-    const siny = 2 * (q.w * q.z + q.x * q.y);
-    const cosy = 1 - 2 * (q.y * q.y + q.z * q.z);
-    const yaw = Math.atan2(siny, cosy) * (180 / Math.PI);
-
-    return { roll, pitch, yaw };
-  };
-
-  const euler = toEuler(orient);
-
-  // Chart data — linear acceleration over time
-  const chartData = history.map((h, i) => ({
+  const sparkData = history.map((h, i) => ({
     i,
     ax: h.data.linear_acceleration.x,
     ay: h.data.linear_acceleration.y,
@@ -57,120 +64,36 @@ export function ImuPanel() {
       <div className="flex items-center gap-2 mb-3">
         <Move3d size={16} className="text-panel-muted" />
         <span className="stat-label">IMU</span>
-        <span className="text-[10px] text-panel-muted font-mono ml-auto">/imu/data</span>
+        <span className="text-[10px] text-panel-muted font-mono ml-auto">ICM-20948 + AK09916</span>
       </div>
 
-      {/* Stats row */}
-      <div className="grid grid-cols-3 gap-4 mb-4">
-        {/* Orientation */}
-        <div>
-          <div className="text-[10px] text-panel-muted uppercase tracking-wider mb-1">
-            Orientation (°)
-          </div>
-          <div className="space-y-0.5 font-mono text-sm">
-            <div className="flex justify-between">
-              <span className="text-red-400">R</span>
-              <span>{euler.roll.toFixed(1)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-green-400">P</span>
-              <span>{euler.pitch.toFixed(1)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-blue-400">Y</span>
-              <span>{euler.yaw.toFixed(1)}</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Angular velocity */}
-        <div>
-          <div className="text-[10px] text-panel-muted uppercase tracking-wider mb-1">
-            Gyro (rad/s)
-          </div>
-          <div className="space-y-0.5 font-mono text-sm">
-            <div className="flex justify-between">
-              <span className="text-red-400">X</span>
-              <span>{gyro.x.toFixed(3)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-green-400">Y</span>
-              <span>{gyro.y.toFixed(3)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-blue-400">Z</span>
-              <span>{gyro.z.toFixed(3)}</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Linear acceleration */}
-        <div>
-          <div className="text-[10px] text-panel-muted uppercase tracking-wider mb-1">
-            Accel (m/s²)
-          </div>
-          <div className="space-y-0.5 font-mono text-sm">
-            <div className="flex justify-between">
-              <span className="text-red-400">X</span>
-              <span>{accel.x.toFixed(3)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-green-400">Y</span>
-              <span>{accel.y.toFixed(3)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-blue-400">Z</span>
-              <span>{accel.z.toFixed(2)}</span>
-            </div>
-          </div>
-        </div>
+      <div className="grid grid-cols-3 gap-3 mb-3">
+        <Vec3 label="Gyro"  data={gyro}    unit="rad/s" decimals={3} />
+        <Vec3 label="Accel" data={accel}   unit="m/s²"  decimals={2} />
+        <Vec3 label="Mag"   data={magData} unit="µT"    decimals={1} scale={1e6} />
       </div>
 
-      {/* Acceleration chart */}
-      {chartData.length > 5 && (
-        <div className="h-36">
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#2a2d3a" />
-              <XAxis dataKey="i" hide />
-              <YAxis
-                domain={['auto', 'auto']}
-                tick={{ fontSize: 10, fill: '#6b7280' }}
-                width={35}
-              />
-              <Legend
-                iconSize={8}
-                wrapperStyle={{ fontSize: '10px', fontFamily: 'monospace' }}
-              />
-              <Line
-                type="monotone"
-                dataKey="ax"
-                stroke="#f87171"
-                strokeWidth={1}
-                dot={false}
-                name="X"
-                isAnimationActive={false}
-              />
-              <Line
-                type="monotone"
-                dataKey="ay"
-                stroke="#4ade80"
-                strokeWidth={1}
-                dot={false}
-                name="Y"
-                isAnimationActive={false}
-              />
-              <Line
-                type="monotone"
-                dataKey="az"
-                stroke="#60a5fa"
-                strokeWidth={1}
-                dot={false}
-                name="Z"
-                isAnimationActive={false}
-              />
-            </LineChart>
-          </ResponsiveContainer>
+      {/* Accel sparkline — X/Y/Z color-coded */}
+      {sparkData.length > 5 && (
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[10px] text-panel-muted uppercase tracking-wider">Accel history</span>
+            <div className="flex gap-2">
+              {(['X', 'Y', 'Z'] as const).map((axis, i) => (
+                <span key={axis} className={`text-[9px] font-mono ${AXIS_COLORS[i]}`}>{axis}</span>
+              ))}
+            </div>
+          </div>
+          <div className="h-20">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={sparkData}>
+                <ReferenceLine y={0} stroke="#2a2d3a" strokeWidth={1} />
+                <Line type="monotone" dataKey="ax" stroke="#f87171" strokeWidth={1} dot={false} isAnimationActive={false} />
+                <Line type="monotone" dataKey="ay" stroke="#4ade80" strokeWidth={1} dot={false} isAnimationActive={false} />
+                <Line type="monotone" dataKey="az" stroke="#60a5fa" strokeWidth={1} dot={false} isAnimationActive={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
         </div>
       )}
     </div>
