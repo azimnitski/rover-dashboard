@@ -77,7 +77,7 @@ function TrajectoryCanvas({ history }: { history: { timestamp: number; data: Odo
 }
 
 export function OdometryPanel() {
-  const { data, history } = useRosTopic<OdomData>('/rtabmap/odom', 200);
+  const { data, history, lastUpdate } = useRosTopic<OdomData>('/rtabmap/odom', 200);
 
   const pos = data?.position;
   const vx = data?.linear_velocity.x ?? 0;
@@ -89,7 +89,9 @@ export function OdometryPanel() {
       <div className="flex items-center gap-2 mb-3">
         <Navigation size={16} className="text-panel-muted" />
         <span className="stat-label">Odometry</span>
-        <span className="ml-auto text-xs text-panel-muted font-mono">RTABMAP</span>
+        <span className="ml-auto text-xs text-panel-muted font-mono">
+          {lastUpdate ? new Date(lastUpdate * 1000).toLocaleTimeString() : '—'}
+        </span>
       </div>
 
       {/* Position + velocity numbers */}

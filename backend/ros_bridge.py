@@ -633,7 +633,8 @@ class RosBridge:
 
                     def make_map_callback(cid=camera_id):
                         def callback(msg):
-                            latest_map_msgs[cid] = msg  # cache for pose-driven re-renders
+                            latest_map_msgs[cid] = msg  # cache for timer-driven re-renders
+                            # Also render immediately on new map data
                             now = time.time()
                             key = f"__map_{cid}"
                             if now - self._last_publish.get(key, 0) >= MIN_MAP_INTERVAL:
@@ -643,6 +644,19 @@ class RosBridge:
 
                     node.create_subscription(OccupancyGrid, map_topic, make_map_callback(), map_qos)
                     logger.info(f"Subscribed to {map_topic} as map '{camera_id}' @ 2fps max")
+
+                # Timer: re-render cached maps at 2fps regardless of localization state.
+                # This keeps the robot-pose arrow live even when localization_pose is not
+                # published (e.g. RTABMAP has not yet recognized a loop closure).
+                def _timer_render_maps():
+                    now = time.time()
+                    for cid, stored_msg in list(latest_map_msgs.items()):
+                        key = f"__map_{cid}"
+                        if now - self._last_publish.get(key, 0) >= MIN_MAP_INTERVAL:
+                            self._last_publish[key] = now
+                            _render_and_send_map(cid, stored_msg)
+
+                node.create_timer(MIN_MAP_INTERVAL, _timer_render_maps)
 
             except ImportError as e:
                 logger.warning(f"cv2/numpy not available, map rendering disabled: {e}")

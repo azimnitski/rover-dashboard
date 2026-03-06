@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { Map, CheckCircle, Circle } from 'lucide-react';
 import { wsClient } from '../lib/wsClient';
 import { useRosTopic } from '../hooks/useRosTopic';
@@ -6,7 +6,7 @@ import { useRosTopic } from '../hooks/useRosTopic';
 type GoalData = { value: boolean };
 type OdomData = { position: { x: number; y: number }; yaw: number };
 
-function MapCanvas({ cameraId }: { cameraId: string }) {
+function MapCanvas({ cameraId, onUpdate }: { cameraId: string; onUpdate?: (t: number) => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hasFrameRef = useRef(false);
   const [hasFrame, setHasFrame] = useState(false);
@@ -29,6 +29,7 @@ function MapCanvas({ cameraId }: { cameraId: string }) {
           hasFrameRef.current = true;
           setHasFrame(true);
         }
+        onUpdate?.(Date.now());
       });
     });
     return () => unsub();
@@ -54,6 +55,9 @@ function MapCanvas({ cameraId }: { cameraId: string }) {
 export function SLAMMapPanel() {
   const { data: goalData } = useRosTopic<GoalData>('/rtabmap/goal_reached');
   const { data: odom } = useRosTopic<OdomData>('/rtabmap/localization_pose');
+  const [lastMapUpdate, setLastMapUpdate] = useState<number | null>(null);
+
+  const handleMapUpdate = useCallback((t: number) => setLastMapUpdate(t), []);
 
   const goalReached = goalData?.value ?? false;
 
@@ -63,7 +67,9 @@ export function SLAMMapPanel() {
       <div className="flex items-center gap-2">
         <Map size={16} className="text-panel-muted" />
         <span className="stat-label">SLAM Map</span>
-        <span className="ml-auto text-xs text-panel-muted font-mono">RTABMAP</span>
+        <span className="ml-auto text-xs text-panel-muted font-mono">
+          {lastMapUpdate ? new Date(lastMapUpdate).toLocaleTimeString() : '—'}
+        </span>
         {goalData !== null && (
           <div className="flex items-center gap-1">
             {goalReached
@@ -89,7 +95,7 @@ export function SLAMMapPanel() {
       <div className="flex gap-3 flex-1">
         <div className="flex flex-col flex-1 gap-1">
           <span className="text-[10px] text-panel-muted font-mono uppercase tracking-wider">Occupancy</span>
-          <MapCanvas cameraId="slam_map" />
+          <MapCanvas cameraId="slam_map" onUpdate={handleMapUpdate} />
         </div>
         <div className="flex flex-col flex-1 gap-1">
           <span className="text-[10px] text-panel-muted font-mono uppercase tracking-wider">Probability</span>

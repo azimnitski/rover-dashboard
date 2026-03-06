@@ -102,7 +102,7 @@ def broadcast_camera_frame(camera_id: str, jpeg_bytes: bytes):
 async def _broadcast_json(message: dict):
     text = json.dumps(message)
     dead = set()
-    for ws in connected_clients:
+    for ws in list(connected_clients):  # snapshot — set can change at every await
         try:
             await ws.send_text(text)
         except Exception:
@@ -112,7 +112,7 @@ async def _broadcast_json(message: dict):
 
 async def _broadcast_binary(data: bytes):
     dead = set()
-    for ws in connected_clients:
+    for ws in list(connected_clients):  # snapshot — set can change at every await
         try:
             await ws.send_bytes(data)
         except Exception:
