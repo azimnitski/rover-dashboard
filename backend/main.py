@@ -37,6 +37,7 @@ connected_clients: Set[WebSocket] = set()
 
 # Store latest values for each topic so new clients get immediate data
 latest_telemetry: Dict[str, dict] = {}
+latest_frames: Dict[str, bytes] = {}  # camera_id → full binary frame (header + payload)
 
 
 # ---------------------------------------------------------------------------
@@ -93,9 +94,9 @@ def broadcast_camera_frame(camera_id: str, jpeg_bytes: bytes):
     """Called from camera streamer when a new frame is ready."""
     # Send binary with a small header: first 64 bytes = camera_id padded
     header = camera_id.encode().ljust(64, b"\x00")
-    asyncio.run_coroutine_threadsafe(
-        _broadcast_binary(header + jpeg_bytes), loop
-    )
+    frame = header + jpeg_bytes
+    latest_frames[camera_id] = frame  # cache for new clients
+    asyncio.run_coroutine_threadsafe(_broadcast_binary(frame), loop)
 
 
 async def _broadcast_json(message: dict):
@@ -138,6 +139,7 @@ async def health():
         "clients": len(connected_clients),
         "ros_connected": ros_bridge is not None and ros_bridge.is_alive(),
         "topics_active": list(latest_telemetry.keys()),
+        "cached_frames": {k: len(v) for k, v in latest_frames.items()},
     }
 
 
@@ -151,9 +153,16 @@ async def websocket_endpoint(ws: WebSocket):
     logger.info(f"Client connected ({len(connected_clients)} total)")
 
     # Send latest snapshot so client immediately has data
-    for topic, message in latest_telemetry.items():
+    for topic, message in list(latest_telemetry.items()):
         try:
             await ws.send_text(json.dumps(message))
+        except Exception:
+            pass
+
+    # Send latest cached binary frames (maps, point clouds) so panels don't wait
+    for frame in list(latest_frames.values()):
+        try:
+            await ws.send_bytes(frame)
         except Exception:
             pass
 

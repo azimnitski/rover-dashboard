@@ -30,7 +30,7 @@ if not MOCK_MODE:
     try:
         import rclpy
         from rclpy.node import Node
-        from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+        from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
         from sensor_msgs.msg import Imu, BatteryState, CameraInfo, Image, NavSatFix, MagneticField, PointCloud2
         from geometry_msgs.msg import Twist, PoseWithCovarianceStamped
         from nav_msgs.msg import Odometry, OccupancyGrid, Path
@@ -306,7 +306,7 @@ def parse_diagnostics(msg) -> dict:
     statuses = []
     for s in msg.status:
         statuses.append({
-            "level": int(s.level),  # 0=OK, 1=WARN, 2=ERROR, 3=STALE
+            "level": s.level[0] if isinstance(s.level, (bytes, bytearray)) else int(s.level),
             "name": s.name,
             "message": s.message,
             "hardware_id": s.hardware_id,
@@ -447,6 +447,14 @@ class RosBridge:
             depth=1,
         )
 
+        # QoS for RTABMAP map/pointcloud topics (RELIABLE + TRANSIENT_LOCAL)
+        map_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+
         for config in TOPIC_CONFIG:
             topic = config["topic"]
             msg_type_str = config["type"]
@@ -523,7 +531,69 @@ class RosBridge:
                 import cv2
                 import numpy as np
 
-                # Track localization pose updates for map overlay
+                # Latest cached OccupancyGrid messages keyed by camera_id
+                latest_map_msgs = {}
+
+                def _render_and_send_map(cid, msg):
+                    """Render OccupancyGrid (with current pose/path overlays) and broadcast."""
+                    try:
+                        w = msg.info.width
+                        h = msg.info.height
+                        if w == 0 or h == 0 or max(w, h) < 64:
+                            return
+                        res = msg.info.resolution
+                        origin_x = msg.info.origin.position.x
+                        origin_y = msg.info.origin.position.y
+
+                        data = np.array(msg.data, dtype=np.int8).reshape((h, w))
+                        img = np.full((h, w, 3), 50, dtype=np.uint8)
+                        img[data == 0] = [180, 180, 180]
+                        img[data == 100] = [20, 20, 20]
+                        mask_known = (data > 0) & (data < 100)
+                        if mask_known.any():
+                            img[mask_known] = np.stack([
+                                (data[mask_known].astype(np.uint16) * 180 // 100).astype(np.uint8),
+                            ] * 3, axis=-1)
+
+                        scale = 512 / max(w, h)
+                        new_w = max(1, int(w * scale))
+                        new_h = max(1, int(h * scale))
+                        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+
+                        def world_to_px(wx, wy):
+                            return int((wx - origin_x) / res * scale), int((wy - origin_y) / res * scale)
+
+                        pts = self._latest_global_path
+                        if len(pts) > 1:
+                            for i in range(len(pts) - 1):
+                                cv2.line(img, world_to_px(pts[i]["x"], pts[i]["y"]),
+                                         world_to_px(pts[i+1]["x"], pts[i+1]["y"]), (255, 100, 0), 1)
+
+                        pts = self._latest_local_path
+                        if len(pts) > 1:
+                            for i in range(len(pts) - 1):
+                                cv2.line(img, world_to_px(pts[i]["x"], pts[i]["y"]),
+                                         world_to_px(pts[i+1]["x"], pts[i+1]["y"]), (255, 200, 0), 1)
+
+                        pose = self._latest_robot_pose
+                        if pose:
+                            px, py = world_to_px(pose["x"], pose["y"])
+                            arrow_len = max(6, int(0.5 / res * scale))
+                            ex = int(px + arrow_len * math.cos(pose["yaw"]))
+                            ey = int(py + arrow_len * math.sin(pose["yaw"]))
+                            cv2.circle(img, (px, py), 4, (0, 220, 0), -1)
+                            cv2.arrowedLine(img, (px, py), (ex, ey), (0, 255, 0), 2, tipLength=0.4)
+
+                        img = cv2.flip(img, 0)
+                        _, jpeg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                        self.on_frame(cid, jpeg.tobytes())
+                    except Exception as e:
+                        logger.error(f"Error rendering map {cid}: {e}", exc_info=True)
+
+                # Re-render all cached maps whenever pose updates (so robot arrow moves
+                # even in localization mode where the OccupancyGrid never changes)
+                MIN_MAP_INTERVAL = 0.5  # seconds between renders
+
                 def _update_pose(msg):
                     p = msg.pose.pose.position
                     q = msg.pose.pose.orientation
@@ -531,6 +601,12 @@ class RosBridge:
                         "x": p.x, "y": p.y,
                         "yaw": _quat_to_yaw(q.x, q.y, q.z, q.w),
                     }
+                    now = time.time()
+                    for cid, stored_msg in list(latest_map_msgs.items()):
+                        key = f"__map_{cid}"
+                        if now - self._last_publish.get(key, 0) >= MIN_MAP_INTERVAL:
+                            self._last_publish[key] = now
+                            _render_and_send_map(cid, stored_msg)
 
                 def _update_global_path(msg):
                     self._latest_global_path = [
@@ -554,91 +630,18 @@ class RosBridge:
                 for map_cfg in MAP_TOPICS:
                     map_topic = map_cfg["topic"]
                     camera_id = map_cfg["camera_id"]
-                    min_interval = 1.0 / 2  # cap at 2 fps (maps change slowly)
 
-                    def make_map_callback(cid=camera_id, mi=min_interval):
+                    def make_map_callback(cid=camera_id):
                         def callback(msg):
+                            latest_map_msgs[cid] = msg  # cache for pose-driven re-renders
                             now = time.time()
                             key = f"__map_{cid}"
-                            if now - self._last_publish.get(key, 0) < mi:
-                                return
-                            self._last_publish[key] = now
-                            try:
-                                w = msg.info.width
-                                h = msg.info.height
-                                if w == 0 or h == 0:
-                                    return
-                                res = msg.info.resolution  # meters/cell
-                                origin_x = msg.info.origin.position.x
-                                origin_y = msg.info.origin.position.y
-
-                                data = np.array(msg.data, dtype=np.int8).reshape((h, w))
-
-                                # Color: unknown=dark gray, free=light gray, occupied=white-ish
-                                img = np.full((h, w, 3), 50, dtype=np.uint8)  # unknown=dark
-                                img[data == 0] = [180, 180, 180]    # free=light gray
-                                img[data == 100] = [20, 20, 20]     # occupied=dark
-                                # For prob map, use gradient
-                                mask_known = (data > 0) & (data < 100)
-                                if mask_known.any():
-                                    img[mask_known] = np.stack([
-                                        (data[mask_known].astype(np.uint16) * 180 // 100).astype(np.uint8),
-                                    ] * 3, axis=-1)
-
-                                # Scale to ≤512px on longest axis
-                                long_side = max(w, h)
-                                if long_side < 64:
-                                    return  # map not ready yet
-                                target = 512
-                                scale = target / long_side
-                                new_w = max(1, int(w * scale))
-                                new_h = max(1, int(h * scale))
-                                img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
-
-                                def world_to_px(wx, wy):
-                                    """Convert world coords to pixel coords (pre-flip)."""
-                                    px = int((wx - origin_x) / res * scale)
-                                    py = int((wy - origin_y) / res * scale)
-                                    return px, py
-
-                                # Overlay global path (blue)
-                                pts = self._latest_global_path
-                                if len(pts) > 1:
-                                    for i in range(len(pts) - 1):
-                                        p1 = world_to_px(pts[i]["x"], pts[i]["y"])
-                                        p2 = world_to_px(pts[i+1]["x"], pts[i+1]["y"])
-                                        cv2.line(img, p1, p2, (255, 100, 0), 1)
-
-                                # Overlay local path (cyan)
-                                pts = self._latest_local_path
-                                if len(pts) > 1:
-                                    for i in range(len(pts) - 1):
-                                        p1 = world_to_px(pts[i]["x"], pts[i]["y"])
-                                        p2 = world_to_px(pts[i+1]["x"], pts[i+1]["y"])
-                                        cv2.line(img, p1, p2, (255, 200, 0), 1)
-
-                                # Overlay robot pose (green arrow)
-                                pose = self._latest_robot_pose
-                                if pose:
-                                    px, py = world_to_px(pose["x"], pose["y"])
-                                    arrow_len = max(6, int(0.5 / res * scale))
-                                    yaw = pose["yaw"]
-                                    ex = int(px + arrow_len * math.cos(yaw))
-                                    ey = int(py + arrow_len * math.sin(yaw))
-                                    cv2.circle(img, (px, py), 4, (0, 220, 0), -1)
-                                    cv2.arrowedLine(img, (px, py), (ex, ey),
-                                                    (0, 255, 0), 2, tipLength=0.4)
-
-                                # Flip vertically: ROS origin = bottom-left, image = top-left
-                                img = cv2.flip(img, 0)
-
-                                _, jpeg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                                self.on_frame(cid, jpeg.tobytes())
-                            except Exception as e:
-                                logger.error(f"Error rendering map {cid}: {e}")
+                            if now - self._last_publish.get(key, 0) >= MIN_MAP_INTERVAL:
+                                self._last_publish[key] = now
+                                _render_and_send_map(cid, msg)
                         return callback
 
-                    node.create_subscription(OccupancyGrid, map_topic, make_map_callback(), sensor_qos)
+                    node.create_subscription(OccupancyGrid, map_topic, make_map_callback(), map_qos)
                     logger.info(f"Subscribed to {map_topic} as map '{camera_id}' @ 2fps max")
 
             except ImportError as e:
@@ -714,11 +717,12 @@ class RosBridge:
                                     payload += colors.tobytes()
 
                                 self.on_frame(cid, payload)
+                                logger.info(f"Point cloud frame sent: {cid} ({actual_n} pts, color={colors is not None})")
                             except Exception as e:
-                                logger.error(f"Error packing point cloud {cid}: {e}")
+                                logger.error(f"Error packing point cloud {cid}: {e}", exc_info=True)
                         return callback
 
-                    node.create_subscription(PointCloud2, pc_topic, make_pc_callback(), sensor_qos)
+                    node.create_subscription(PointCloud2, pc_topic, make_pc_callback(), map_qos)
                     logger.info(f"Subscribed to {pc_topic} as point cloud '{camera_id}' @ 2fps max")
 
             except ImportError as e:
