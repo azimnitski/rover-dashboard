@@ -24,6 +24,7 @@ class WSClient {
   private handlers: Map<string, Set<MessageHandler>> = new Map();
   private globalHandlers: Set<(msg: TelemetryMessage) => void> = new Set();
   private frameHandlers: Map<string, Set<FrameHandler>> = new Map();
+  private latestFrames: Map<string, Uint8Array<ArrayBuffer>> = new Map();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelay = 1000;
   private maxReconnectDelay = 10000;
@@ -83,7 +84,8 @@ class WSClient {
           if (buf.byteLength <= FRAME_HEADER_LEN) return;
           const header = new Uint8Array(buf, 0, FRAME_HEADER_LEN);
           const cameraId = new TextDecoder().decode(header).replace(/\0+$/, '');
-          const jpeg = new Uint8Array(buf, FRAME_HEADER_LEN);
+          // slice() returns a fresh ArrayBuffer (byteOffset=0) so Blob sees clean data
+          const jpeg = new Uint8Array(buf.slice(FRAME_HEADER_LEN));
           this.dispatchFrame(cameraId, jpeg);
         }
       };
@@ -139,6 +141,12 @@ class WSClient {
     }
     this.frameHandlers.get(cameraId)!.add(handler);
 
+    // Replay latest cached frame immediately so panels don't wait for the next broadcast
+    const latest = this.latestFrames.get(cameraId);
+    if (latest) {
+      queueMicrotask(() => handler(latest));
+    }
+
     return () => {
       this.frameHandlers.get(cameraId)?.delete(handler);
     };
@@ -176,6 +184,7 @@ class WSClient {
   }
 
   private dispatchFrame(cameraId: string, jpeg: Uint8Array<ArrayBuffer>) {
+    this.latestFrames.set(cameraId, jpeg);
     this.frameHandlers.get(cameraId)?.forEach((h) => h(jpeg));
   }
 

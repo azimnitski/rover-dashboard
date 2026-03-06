@@ -57,7 +57,7 @@ function CameraFeed({
           hasFrameRef.current = true;
           setHasFrame(true); // one-time re-render to swap placeholder → canvas
         }
-      });
+      }).catch((e) => console.error(`[Camera:${cameraId}] decode error`, e));
     });
 
     return () => unsub();

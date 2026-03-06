@@ -11,7 +11,6 @@ import { CameraPanel } from './components/CameraPanel';
 import { OdometryPanel } from './components/OdometryPanel';
 import { SLAMMapPanel } from './components/SLAMMapPanel';
 import { DiagnosticsPanel } from './components/DiagnosticsPanel';
-import { GPSPanel } from './components/GPSPanel';
 import { PointCloud3DPanel } from './components/PointCloud3DPanel';
 
 // ---------------------------------------------------------------------------
@@ -34,7 +33,6 @@ const PANEL_DEFS: PanelDef[] = [
   { id: 'odometry',    label: 'Odometry',        colSpan: 1, component: OdometryPanel },
   { id: 'slammap',     label: 'SLAM Map',        colSpan: 2, component: SLAMMapPanel },
   { id: 'diagnostics', label: 'Diagnostics',     colSpan: 2, component: DiagnosticsPanel },
-  { id: 'gps',         label: 'GPS',             colSpan: 1, component: GPSPanel },
   { id: 'pointcloud',  label: 'Point Cloud 3D',  colSpan: 3, component: PointCloud3DPanel },
 ];
 

@@ -16,7 +16,7 @@ import os
 import time
 import logging
 from contextlib import asynccontextmanager
-from typing import Dict, Set
+from typing import Dict, Set, Tuple
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
@@ -39,13 +39,35 @@ connected_clients: Set[WebSocket] = set()
 latest_telemetry: Dict[str, dict] = {}
 latest_frames: Dict[str, bytes] = {}  # camera_id → full binary frame (header + payload)
 
+# Single-worker broadcast queue — serialises all sends so two coroutines
+# never call send_bytes/send_text on the same WebSocket concurrently.
+_broadcast_queue: asyncio.Queue = None  # type: ignore[assignment]
+
+
+async def _broadcast_worker():
+    while True:
+        kind, data = await _broadcast_queue.get()
+        try:
+            if kind == "text":
+                await _broadcast_json(data)
+            else:
+                await _broadcast_binary(data)
+        except Exception as exc:
+            logger.error("[broadcast_worker] %s", exc)
+        finally:
+            _broadcast_queue.task_done()
+
 
 # ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global ros_bridge, camera_streamer
+    global ros_bridge, camera_streamer, loop, _broadcast_queue
+    loop = asyncio.get_running_loop()
+
+    _broadcast_queue = asyncio.Queue()
+    asyncio.create_task(_broadcast_worker())
 
     logger.info("Starting ROS 2 bridge...")
     ros_bridge = RosBridge(on_telemetry=broadcast_telemetry, on_frame=broadcast_camera_frame)
@@ -87,7 +109,8 @@ def broadcast_telemetry(topic: str, data: dict):
         "timestamp": time.time(),
     }
     latest_telemetry[topic] = message
-    asyncio.run_coroutine_threadsafe(_broadcast_json(message), loop)
+    if _broadcast_queue is not None:
+        loop.call_soon_threadsafe(_broadcast_queue.put_nowait, ("text", message))
 
 
 def broadcast_camera_frame(camera_id: str, jpeg_bytes: bytes):
@@ -96,7 +119,8 @@ def broadcast_camera_frame(camera_id: str, jpeg_bytes: bytes):
     header = camera_id.encode().ljust(64, b"\x00")
     frame = header + jpeg_bytes
     latest_frames[camera_id] = frame  # cache for new clients
-    asyncio.run_coroutine_threadsafe(_broadcast_binary(frame), loop)
+    if _broadcast_queue is not None:
+        loop.call_soon_threadsafe(_broadcast_queue.put_nowait, ("binary", frame))
 
 
 async def _broadcast_json(message: dict):
@@ -149,22 +173,23 @@ async def health():
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
-    connected_clients.add(ws)
-    logger.info(f"Client connected ({len(connected_clients)} total)")
 
-    # Send latest snapshot so client immediately has data
+    # Send snapshot BEFORE joining connected_clients — prevents a concurrent
+    # _broadcast_binary from racing with this burst on the same WebSocket.
     for topic, message in list(latest_telemetry.items()):
         try:
             await ws.send_text(json.dumps(message))
         except Exception:
             pass
 
-    # Send latest cached binary frames (maps, point clouds) so panels don't wait
     for frame in list(latest_frames.values()):
         try:
             await ws.send_bytes(frame)
         except Exception:
             pass
+
+    connected_clients.add(ws)
+    logger.info(f"Client connected ({len(connected_clients)} total)")
 
     try:
         while True:

@@ -30,7 +30,7 @@ function MapCanvas({ cameraId, onUpdate }: { cameraId: string; onUpdate?: (t: nu
           setHasFrame(true);
         }
         onUpdate?.(Date.now());
-      });
+      }).catch((e) => console.error(`[Map:${cameraId}] decode error`, e));
     });
     return () => unsub();
   }, [cameraId]);
