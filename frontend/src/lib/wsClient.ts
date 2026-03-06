@@ -25,6 +25,7 @@ class WSClient {
   private globalHandlers: Set<(msg: TelemetryMessage) => void> = new Set();
   private frameHandlers: Map<string, Set<FrameHandler>> = new Map();
   private latestFrames: Map<string, Uint8Array<ArrayBuffer>> = new Map();
+  private latestTelemetry: Map<string, TelemetryMessage> = new Map();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelay = 1000;
   private maxReconnectDelay = 10000;
@@ -116,6 +117,12 @@ class WSClient {
     }
     this.handlers.get(topic)!.add(handler);
 
+    // Replay latest cached message so panels populate immediately on mount/remount
+    const latest = this.latestTelemetry.get(topic);
+    if (latest) {
+      queueMicrotask(() => handler(latest));
+    }
+
     return () => {
       this.handlers.get(topic)?.delete(handler);
     };
@@ -173,6 +180,8 @@ class WSClient {
   }
 
   private dispatch(msg: TelemetryMessage) {
+    this.latestTelemetry.set(msg.topic, msg);
+
     // Topic-specific handlers
     const topicHandlers = this.handlers.get(msg.topic);
     if (topicHandlers) {
