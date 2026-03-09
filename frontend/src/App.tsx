@@ -27,7 +27,7 @@ const PANEL_DEFS: PanelDef[] = [
   { id: 'battery',     label: 'Battery',        colSpan: 1, component: BatteryPanel },
   { id: 'motors',      label: 'Motors',          colSpan: 1, component: MotorsPanel },
   { id: 'cmdvel',      label: 'Cmd Vel',         colSpan: 1, component: CmdVelPanel },
-  { id: 'imu',         label: 'IMU',             colSpan: 2, component: ImuPanel },
+  { id: 'imu',         label: 'IMU',             colSpan: 1, component: ImuPanel },
   { id: 'topics',      label: 'Topic Explorer',  colSpan: 1, component: TopicExplorer },
   { id: 'camera',      label: 'Camera',          colSpan: 3, component: CameraPanel },
   { id: 'odometry',    label: 'Odometry',        colSpan: 1, component: OdometryPanel },
