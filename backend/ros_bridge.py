@@ -55,7 +55,7 @@ TOPIC_CONFIG = [
     {
         "topic": "/imu",
         "type": "sensor_msgs/msg/Imu",
-        "throttle_hz": 10,
+        "throttle_hz": 5,
     },
     {
         "topic": "/imu/mag",
@@ -179,10 +179,9 @@ POINTCLOUD_TOPICS = [
 ]
 
 # Image topics streamed as JPEG binary frames (not JSON telemetry)
+# Only color stream — depth/aligned_depth encoding is too expensive on Jetson
 IMAGE_TOPICS = [
-    {"topic": "/camera/camera/color/image_raw",               "camera_id": "color"},
-    {"topic": "/camera/camera/depth/image_rect_raw",          "camera_id": "depth"},
-    {"topic": "/camera/camera/aligned_depth_to_color/image_raw", "camera_id": "aligned_depth"},
+    {"topic": "/camera/camera/color/image_raw", "camera_id": "color"},
 ]
 
 
@@ -496,7 +495,7 @@ class RosBridge:
                 for img_cfg in IMAGE_TOPICS:
                     img_topic = img_cfg["topic"]
                     camera_id = img_cfg["camera_id"]
-                    min_interval = 1.0 / 15  # cap at 15 fps
+                    min_interval = 1.0 / 5  # cap at 5 fps
 
                     def make_image_callback(cid=camera_id, mi=min_interval):
                         def callback(msg):
@@ -512,15 +511,15 @@ class RosBridge:
                                     cv_img = bridge.imgmsg_to_cv2(msg, "16UC1")
                                     cv_img = cv2.normalize(cv_img, None, 0, 255, cv2.NORM_MINMAX)
                                     cv_img = cv2.applyColorMap(cv_img.astype(np.uint8), cv2.COLORMAP_JET)
-                                cv_img = cv2.resize(cv_img, (640, 480))
-                                _, jpeg = cv2.imencode(".jpg", cv_img, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                                cv_img = cv2.resize(cv_img, (320, 240))
+                                _, jpeg = cv2.imencode(".jpg", cv_img, [cv2.IMWRITE_JPEG_QUALITY, 60])
                                 self.on_frame(cid, jpeg.tobytes())
                             except Exception as e:
                                 logger.error(f"Error encoding {cid} frame: {e}")
                         return callback
 
                     node.create_subscription(Image, img_topic, make_image_callback(), sensor_qos)
-                    logger.info(f"Subscribed to {img_topic} as camera '{camera_id}' @ 15fps max")
+                    logger.info(f"Subscribed to {img_topic} as camera '{camera_id}' @ 5fps max")
 
             except ImportError as e:
                 logger.warning(f"cv_bridge/cv2 not available, camera image streaming disabled: {e}")
