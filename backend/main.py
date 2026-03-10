@@ -214,8 +214,11 @@ async def handle_client_message(ws: WebSocket, msg: dict):
     if msg_type == "ping":
         await ws.send_text(json.dumps({"type": "pong", "timestamp": time.time()}))
 
-    # Future: subscribe/unsubscribe to specific topics
-    # Future: send cmd_vel or motor commands
+    elif msg_type == "set_active_panels":
+        panels = msg.get("panels", [])
+        if ros_bridge:
+            ros_bridge.set_active_panels(panels)
+
     elif msg_type == "command":
         logger.info(f"Received command: {msg}")
         # ros_bridge.publish(msg["topic"], msg["data"])

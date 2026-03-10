@@ -413,6 +413,13 @@ class RosBridge:
         self._latest_robot_pose: Optional[dict] = None  # {x, y, yaw} in map frame
         self._latest_global_path: List[dict] = []       # [{x, y}, ...]
         self._latest_local_path: List[dict] = []
+        # Panels actively shown in the browser — only encode/send for active panels
+        self._active_panels: set = {'camera', 'slammap', 'pointcloud'}
+
+    def set_active_panels(self, panels: list) -> None:
+        """Called from main thread when browser reports which panels are expanded."""
+        self._active_panels = set(panels)
+        logger.info(f"Active panels: {self._active_panels}")
 
     def start(self):
         self._running = True
@@ -499,6 +506,8 @@ class RosBridge:
 
                     def make_image_callback(cid=camera_id, mi=min_interval):
                         def callback(msg):
+                            if 'camera' not in self._active_panels:
+                                return
                             now = time.time()
                             key = f"__img_{cid}"
                             if now - self._last_publish.get(key, 0) < mi:
@@ -535,6 +544,8 @@ class RosBridge:
 
                 def _render_and_send_map(cid, msg):
                     """Render OccupancyGrid (with current pose/path overlays) and broadcast."""
+                    if 'slammap' not in self._active_panels:
+                        return
                     try:
                         w = msg.info.width
                         h = msg.info.height
@@ -673,6 +684,8 @@ class RosBridge:
 
                     def make_pc_callback(cid=camera_id, mi=min_interval):
                         def callback(msg):
+                            if 'pointcloud' not in self._active_panels:
+                                return
                             now = time.time()
                             key = f"__pc_{cid}"
                             if now - self._last_publish.get(key, 0) < mi:

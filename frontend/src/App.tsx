@@ -1,6 +1,7 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { GripVertical, ChevronUp, ChevronDown } from 'lucide-react';
 import { useConnectionStatus } from './hooks/useRosTopic';
+import { wsClient } from './lib/wsClient';
 import { ConnectionBadge } from './components/ConnectionBadge';
 import { ImuPanel } from './components/ImuPanel';
 import { BatteryPanel } from './components/BatteryPanel';
@@ -259,6 +260,13 @@ export default function App() {
     setCollapsed({});
     persist(order, {});
   }, [order]);
+
+  // Notify backend which panels are expanded so it can skip encoding for collapsed ones
+  useEffect(() => {
+    if (!connected) return;
+    const active = order.filter(id => !collapsed[id]);
+    wsClient.send({ type: 'set_active_panels', panels: active });
+  }, [connected, collapsed, order]);
 
   return (
     <div className="min-h-screen bg-panel-bg p-4 md:p-6">
