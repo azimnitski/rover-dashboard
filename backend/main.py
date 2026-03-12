@@ -319,6 +319,99 @@ async def llm_chat(req: LLMRequest):
 
 
 # ---------------------------------------------------------------------------
+# Bluetooth API — pair/connect a Bluetooth joystick
+# ---------------------------------------------------------------------------
+async def _btctl(*args, input_text: str | None = None) -> str:
+    """Run a bluetoothctl command and return stdout."""
+    proc = await asyncio.create_subprocess_exec(
+        "bluetoothctl", *args,
+        stdin=asyncio.subprocess.PIPE if input_text else asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    stdin_bytes = input_text.encode() if input_text else None
+    stdout, _ = await asyncio.wait_for(proc.communicate(stdin_bytes), timeout=15)
+    return stdout.decode(errors="replace")
+
+
+def _parse_devices(raw: str) -> list[dict]:
+    """Parse lines like: Device AA:BB:CC:DD:EE:FF My Joystick"""
+    devices = []
+    for line in raw.splitlines():
+        parts = line.strip().split(" ", 2)
+        if len(parts) >= 2 and parts[0] == "Device":
+            devices.append({
+                "address": parts[1],
+                "name": parts[2] if len(parts) == 3 else parts[1],
+            })
+    return devices
+
+
+@app.post("/api/bluetooth/scan")
+async def bluetooth_scan():
+    """Scan for Bluetooth devices for 8 seconds and return found devices."""
+    try:
+        # Feed commands via stdin so bluetoothctl doesn't need a TTY
+        await _btctl(input_text="scan on\n")
+        await asyncio.sleep(8)
+        await _btctl(input_text="scan off\n")
+        raw = await _btctl("devices")
+        return {"devices": _parse_devices(raw)}
+    except asyncio.TimeoutError:
+        return {"error": "bluetoothctl timed out", "devices": []}
+    except FileNotFoundError:
+        return {"error": "bluetoothctl not found — is bluez installed?", "devices": []}
+    except Exception as e:
+        return {"error": str(e), "devices": []}
+
+
+@app.get("/api/bluetooth/devices")
+async def bluetooth_devices():
+    """List already-paired Bluetooth devices."""
+    try:
+        raw = await _btctl("devices")
+        devices = _parse_devices(raw)
+        # Enrich with connected status
+        for dev in devices:
+            info = await _btctl("info", dev["address"])
+            dev["connected"] = "Connected: yes" in info
+            dev["paired"] = "Paired: yes" in info
+        return {"devices": devices}
+    except Exception as e:
+        return {"error": str(e), "devices": []}
+
+
+class BtConnectRequest(BaseModel):
+    address: str
+
+
+@app.post("/api/bluetooth/connect")
+async def bluetooth_connect(req: BtConnectRequest):
+    """Connect (and pair/trust if needed) a Bluetooth device by MAC address."""
+    addr = req.address
+    try:
+        await _btctl("trust", addr)
+        await _btctl("pair", addr)
+        out = await _btctl("connect", addr)
+        success = "Connection successful" in out or "already connected" in out.lower()
+        return {"success": success, "output": out.strip()}
+    except asyncio.TimeoutError:
+        return {"success": False, "error": "Connection timed out"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/bluetooth/disconnect")
+async def bluetooth_disconnect(req: BtConnectRequest):
+    """Disconnect a Bluetooth device."""
+    try:
+        out = await _btctl("disconnect", req.address)
+        return {"success": True, "output": out.strip()}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
 # Static file serving (production builds land in ./static)
 # ---------------------------------------------------------------------------
 static_dir = os.path.join(os.path.dirname(__file__), "static")

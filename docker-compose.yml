@@ -6,8 +6,13 @@ services:
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
       - OLLAMA_URL=http://172.18.0.1:11434
+      - DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
+    cap_add:
+      - NET_ADMIN
     networks:
       - ros_net
     restart: unless-stopped

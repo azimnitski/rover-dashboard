@@ -31,7 +31,7 @@ if not MOCK_MODE:
         import rclpy
         from rclpy.node import Node
         from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
-        from sensor_msgs.msg import Imu, BatteryState, CameraInfo, Image, NavSatFix, MagneticField, PointCloud2
+        from sensor_msgs.msg import Imu, BatteryState, CameraInfo, Image, NavSatFix, MagneticField, PointCloud2, Joy
         from geometry_msgs.msg import Twist, PoseWithCovarianceStamped
         from nav_msgs.msg import Odometry, OccupancyGrid, Path
         from std_msgs.msg import Float32, Float32MultiArray, Int32MultiArray, Int32, Bool
@@ -164,6 +164,11 @@ TOPIC_CONFIG = [
         "topic": "/camera/camera/extrinsics/depth_to_color",
         "type": "realsense2_camera_msgs/msg/Extrinsics",
         "throttle_hz": 1,
+    },
+    {
+        "topic": "/joy",
+        "type": "sensor_msgs/msg/Joy",
+        "throttle_hz": 20,
     },
 ]
 
@@ -350,6 +355,13 @@ def parse_extrinsics(msg) -> dict:
     }
 
 
+def parse_joy(msg) -> dict:
+    return {
+        "axes": list(msg.axes),
+        "buttons": list(msg.buttons),
+    }
+
+
 PARSERS = {
     "sensor_msgs/msg/Imu": parse_imu,
     "std_msgs/msg/Float32": parse_float32,
@@ -372,6 +384,7 @@ PARSERS = {
     "sensor_msgs/msg/CameraInfo": parse_camera_info,
     "realsense2_camera_msgs/msg/Metadata": parse_metadata,
     "realsense2_camera_msgs/msg/Extrinsics": parse_extrinsics,
+    "sensor_msgs/msg/Joy": parse_joy,
 }
 
 # Map type strings to actual ROS message classes
@@ -394,6 +407,7 @@ if not MOCK_MODE:
         "sensor_msgs/msg/CameraInfo": CameraInfo,
         "realsense2_camera_msgs/msg/Metadata": Metadata,
         "realsense2_camera_msgs/msg/Extrinsics": Extrinsics,
+        "sensor_msgs/msg/Joy": Joy,
     }
 
 

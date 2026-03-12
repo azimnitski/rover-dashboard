@@ -23,7 +23,8 @@ RUN apt-get update && \
         python3-pip \
         ros-humble-realsense2-camera-msgs \
         ros-humble-cv-bridge \
-        python3-opencv && \
+        python3-opencv \
+        bluez && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
