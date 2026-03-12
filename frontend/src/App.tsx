@@ -13,6 +13,7 @@ import { OdometryPanel } from './components/OdometryPanel';
 import { SLAMMapPanel } from './components/SLAMMapPanel';
 import { DiagnosticsPanel } from './components/DiagnosticsPanel';
 import { PointCloud3DPanel } from './components/PointCloud3DPanel';
+import { AgentPanel } from './components/AgentPanel';
 
 // ---------------------------------------------------------------------------
 // Panel registry
@@ -35,6 +36,7 @@ const PANEL_DEFS: PanelDef[] = [
   { id: 'slammap',     label: 'SLAM Map',        colSpan: 2, component: SLAMMapPanel },
   { id: 'diagnostics', label: 'Diagnostics',     colSpan: 2, component: DiagnosticsPanel },
   { id: 'pointcloud',  label: 'Point Cloud 3D',  colSpan: 3, component: PointCloud3DPanel },
+  { id: 'agent',       label: 'LLM Agent',        colSpan: 2, component: AgentPanel },
 ];
 
 const PANEL_MAP = Object.fromEntries(PANEL_DEFS.map(p => [p.id, p]));

@@ -5,6 +5,9 @@ services:
       - "8765:8765"
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - OLLAMA_URL=http://172.18.0.1:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - ros_net
     restart: unless-stopped

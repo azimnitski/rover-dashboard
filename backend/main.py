@@ -15,12 +15,15 @@ import json
 import os
 import time
 import logging
+import httpx
 from contextlib import asynccontextmanager
 from typing import Dict, Set, Tuple
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from ros_bridge import RosBridge
 from camera_stream import CameraStreamer
@@ -222,6 +225,97 @@ async def handle_client_message(ws: WebSocket, msg: dict):
     elif msg_type == "command":
         logger.info(f"Received command: {msg}")
         # ros_bridge.publish(msg["topic"], msg["data"])
+
+
+# ---------------------------------------------------------------------------
+# LLM proxy — streams Ollama responses token by token
+# ---------------------------------------------------------------------------
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+
+THINK_SYSTEM_PROMPT = (
+    "You are an AI assistant for an autonomous rover. "
+    "Before answering, reason through the problem step by step inside "
+    "<think>...</think> tags, then give your final answer after them. "
+    "Be concise but thorough in your reasoning."
+)
+
+
+class LLMRequest(BaseModel):
+    prompt: str
+    model: str = "llama3.2:3b-rover"   # rover variant: num_ctx=2048, fits in fragmented IOVA
+    system: str = THINK_SYSTEM_PROMPT
+
+
+async def _compact_memory():
+    """Trigger kernel memory compaction to defragment CUDA IOVA space."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "sudo", "/usr/local/bin/compact-memory",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(proc.wait(), timeout=5)
+        await asyncio.sleep(1)
+    except Exception as e:
+        logger.warning("compact_memory failed: %s", e)
+
+
+@app.post("/api/llm/chat")
+async def llm_chat(req: LLMRequest):
+    """Stream Ollama response token by token as newline-delimited JSON.
+
+    Automatically compacts memory and retries once on CUDA OOM so GPU
+    inference works alongside the Nav2 stack on Jetson unified memory.
+    """
+
+    async def generate():
+        payload = {
+            "model": req.model,
+            "system": req.system,
+            "prompt": req.prompt,
+            "stream": True,
+        }
+
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=120) as client:
+                    async with client.stream("POST", f"{OLLAMA_URL}/api/generate", json=payload) as resp:
+                        cuda_oom = False
+                        buffered = []
+                        async for line in resp.aiter_lines():
+                            if not line:
+                                continue
+                            # Detect CUDA OOM on first attempt — buffer until we know
+                            if attempt == 0:
+                                try:
+                                    obj = json.loads(line)
+                                    if obj.get("error") and "cuda" in obj["error"].lower() and "memory" in obj["error"].lower():
+                                        cuda_oom = True
+                                        break
+                                except Exception:
+                                    pass
+                                buffered.append(line)
+                            else:
+                                yield line + "\n"
+
+                        if cuda_oom:
+                            logger.warning("CUDA OOM detected — compacting memory and retrying")
+                            yield json.dumps({"info": "CUDA OOM — compacting memory, retrying on CPU…", "done": False}) + "\n"
+                            await _compact_memory()
+                            # Fall through to retry with num_gpu=0 (CPU fallback)
+                            payload["options"] = {"num_gpu": 0}
+                            continue
+
+                        # Flush buffer (first successful attempt)
+                        for bl in buffered:
+                            yield bl + "\n"
+                        return
+
+            except Exception as e:
+                yield json.dumps({"error": str(e), "done": True}) + "\n"
+                return
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
 
 
 # ---------------------------------------------------------------------------
