@@ -77,7 +77,7 @@ function TrajectoryCanvas({ history }: { history: { timestamp: number; data: Odo
 }
 
 export function OdometryPanel() {
-  const { data, history, lastUpdate } = useRosTopic<OdomData>('/rtabmap/odom', 200);
+  const { data, history, lastUpdate } = useRosTopic<OdomData>('/odometry/filtered', 200);
 
   const pos = data?.position;
   const vx = data?.linear_velocity.x ?? 0;

@@ -92,6 +92,12 @@ TOPIC_CONFIG = [
         "type": "geometry_msgs/msg/Twist",
         "throttle_hz": 10,
     },
+    # EKF filtered odometry — primary pose estimate used by Nav2
+    {
+        "topic": "/odometry/filtered",
+        "type": "nav_msgs/msg/Odometry",
+        "throttle_hz": 10,
+    },
     # RTABMAP / Navigation
     {
         "topic": "/rtabmap/odom",
@@ -184,9 +190,10 @@ POINTCLOUD_TOPICS = [
 ]
 
 # Image topics streamed as JPEG binary frames (not JSON telemetry)
-# Only color stream — depth/aligned_depth encoding is too expensive on Jetson
 IMAGE_TOPICS = [
     {"topic": "/camera/camera/color/image_raw", "camera_id": "color"},
+    # Aligned depth: 16UC1 (mm) → normalise → TURBO colormap → JPEG
+    {"topic": "/camera/camera/aligned_depth_to_color/image_raw", "camera_id": "aligned_depth", "depth": True},
 ]
 
 
