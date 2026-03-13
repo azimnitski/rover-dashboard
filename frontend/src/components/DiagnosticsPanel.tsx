@@ -39,7 +39,12 @@ export function DiagnosticsPanel() {
   const diagAge = lastUpdate ? now - lastUpdate * 1000 : Infinity;
   const diagStale = diagAge > STALE_MS;
 
-  const statuses = diagData?.status ?? [];
+  // "No events recorded" is a transient robot_localization diagnostic that
+  // appears briefly when the EKF executor is briefly CPU-starved by Nav2.
+  // It always clears on the next update cycle — suppress it to avoid noise.
+  const statuses = (diagData?.status ?? []).filter(
+    s => s.message !== 'No events recorded'
+  );
   const worst    = statuses.reduce((acc, s) => Math.max(acc, s.level), 0);
   const worstMeta = LEVEL_META[Math.min(worst, 3)];
 

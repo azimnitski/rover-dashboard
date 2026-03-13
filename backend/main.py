@@ -289,7 +289,8 @@ async def llm_chat(req: LLMRequest):
                             if attempt == 0:
                                 try:
                                     obj = json.loads(line)
-                                    if obj.get("error") and "cuda" in obj["error"].lower() and "memory" in obj["error"].lower():
+                                    err_low = obj["error"].lower() if obj.get("error") else ""
+                                    if err_low and "cuda" in err_low and any(w in err_low for w in ("memory", "buffer", "allocate", "failed to load")):
                                         cuda_oom = True
                                         break
                                 except Exception:
