@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react';
 import { Activity } from 'lucide-react';
 import { useRosTopic } from '../hooks/useRosTopic';
 
@@ -23,9 +24,20 @@ function Dot({ ok }: { ok: boolean }) {
   return <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${ok ? 'bg-panel-success' : 'bg-panel-danger'}`} />;
 }
 
+const STALE_MS = 5000; // dim diagnostics older than 5 seconds
+
 export function DiagnosticsPanel() {
-  const { data: diagData } = useRosTopic<DiagnosticsData>('/diagnostics');
-  const { data: esp32 }    = useRosTopic<FreertosData>('/freertos_int32_publisher');
+  const { data: diagData, lastUpdate } = useRosTopic<DiagnosticsData>('/diagnostics');
+  const { data: esp32 }                = useRosTopic<FreertosData>('/freertos_int32_publisher');
+
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const diagAge = lastUpdate ? now - lastUpdate * 1000 : Infinity;
+  const diagStale = diagAge > STALE_MS;
 
   const statuses = diagData?.status ?? [];
   const worst    = statuses.reduce((acc, s) => Math.max(acc, s.level), 0);
@@ -73,11 +85,16 @@ export function DiagnosticsPanel() {
 
       {/* ROS /diagnostics */}
       <div>
-        <div className="text-[10px] text-panel-muted uppercase tracking-wider mb-1.5">ROS Diagnostics</div>
+        <div className="flex items-center justify-between mb-1.5">
+          <div className="text-[10px] text-panel-muted uppercase tracking-wider">ROS Diagnostics</div>
+          {diagStale && statuses.length > 0 && (
+            <span className="text-[9px] font-mono text-panel-border">stale {Math.round(diagAge / 1000)}s ago</span>
+          )}
+        </div>
         {statuses.length === 0 ? (
           <div className="text-panel-muted text-xs font-mono">No messages…</div>
         ) : (
-          <div className="space-y-1 max-h-40 overflow-y-auto">
+          <div className={`space-y-1 max-h-40 overflow-y-auto transition-opacity ${diagStale ? 'opacity-40' : ''}`}>
             {statuses.map((s, i) => {
               const meta = LEVEL_META[Math.min(s.level, 3)];
               return (
